@@ -188,3 +188,5 @@ def test_rows_round_trip_with_list_columns_and_typed_version(tmp_path):
     assert str(pq.read_schema(path).field("version").type) == "int32"
     empty = write_parquet([], tmp_path / "empty.parquet")
     assert empty["rows"] == 0 and read_parquet(tmp_path / "empty.parquet") == []
+    # The datasets library reads a file in batches the size of its first row group, and fails on one of 0 rows.
+    assert pq.ParquetFile(tmp_path / "empty.parquet").metadata.num_row_groups == 0
