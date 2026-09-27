@@ -14,7 +14,7 @@ Offline tests: `pip install '.[test]'`, then `python -m pytest -q`. No network o
 - `test_summaries.py`: summaries against a fake API that reorders ties: complete reads where offset paging skips, the daily check, removals.
 - `test_constitution.py`: Constitution Annotated ids, listing, rows, a sync.
 - `test_http.py`: pacing, challenges, quota exhaustion, missing keys, outages.
-- `test_store.py`: partition keys, Parquet round trips, the commit fence, no scratch left behind.
+- `test_store.py`: partition keys, Parquet round trips, the commit fence and which failures it retries, no scratch left behind.
 - `test_verify.py`: each planted data defect is named; exit 1.
 - `test_card.py`: the products card's front matter and numbers.
 - `test_cli.py`: exit codes, `$GITHUB_OUTPUT`, Trusted Publishing, dataset routing, and every workflow's commands, options, outputs and schedule.

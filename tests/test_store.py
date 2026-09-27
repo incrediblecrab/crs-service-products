@@ -1,5 +1,6 @@
 """The store: partition keys, Parquet round trips, and the Hub commit fence against a fake Hub API."""
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -108,6 +109,49 @@ def test_a_412_whose_head_holds_a_different_manifest_is_superseded(hub):
     api.create_commit = other_writer_first
     with pytest.raises(Superseded):
         store.commit("first")
+
+
+def test_a_readme_check_answered_with_a_busy_page_is_retried(hub):
+    """huggingface_hub parses the validate-yaml body before it checks the status, so a busy Hub raises JSONDecodeError before anything is uploaded; the Fed scheduled run of September 27, 2026 stopped on one."""
+    store, api = hub
+    real_create = api.create_commit
+
+    def busy_first(*args, **kwargs):
+        api.create_commit = real_create
+        raise json.JSONDecodeError("Expecting value", "", 0)
+
+    api.create_commit = busy_first
+    store.stage_manifest({"n": 1})
+    assert store.commit("first") == "c1" and api.commits == ["first"]
+
+
+def test_a_dropped_connection_whose_commit_landed_is_adopted(hub):
+    store, api = hub
+    real_create = api.create_commit
+
+    def lands_then_drops(*args, **kwargs):
+        api.create_commit = real_create
+        real_create(*args, **kwargs)
+        raise httpx.ReadTimeout("planted: the response never arrived")
+
+    api.create_commit = lands_then_drops
+    store.stage_manifest({"n": 1})
+    assert store.commit("first") == "c1"
+    assert api.commits == ["first"] and store.superseded is None, "the retry adopted the landed commit rather than committing twice"
+
+
+def test_invalid_card_metadata_is_raised_at_once(hub):
+    store, api = hub
+
+    def invalid(*args, **kwargs):
+        api.attempts += 1
+        raise ValueError("Invalid metadata in README.md.")
+
+    api.create_commit = invalid
+    store.stage_manifest({"n": 1})
+    with pytest.raises(ValueError, match="Invalid metadata"):
+        store.commit("first")
+    assert api.attempts == 1, "JSONDecodeError is a ValueError, but a card the Hub rejects is not retried"
 
 
 def test_git_blob_sha1_matches_git():
