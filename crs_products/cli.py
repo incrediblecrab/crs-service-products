@@ -96,6 +96,10 @@ def cmd_run(args):
     print(json.dumps(run, indent=1))
     # more: the budget ran out while the run was still making progress, so another run should start without waiting for the schedule.
     github_output(commits=run["commits"], more="true" if run["stopped"] == "budget" and run["fetched"] > 0 else "false")
+    for message in run.get("warnings", []):
+        warn(message)
+    if run["stopped"] == "incomplete listing":
+        return 0
     if run["stopped"] in CLEAN_STOPS + ("deferred", "superseded"):
         return 0
     warn(f"run stopped: {run['stopped']}")
@@ -166,6 +170,8 @@ def cmd_verify(args):
         if fetcher:
             fetcher.close()
     print(json.dumps(report, indent=1))
+    for message in report.get("warnings", []):
+        warn(message)
     return 1 if report["problems"] else 0
 
 

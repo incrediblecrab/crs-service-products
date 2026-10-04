@@ -19,6 +19,8 @@ This repository builds and updates three public Hugging Face datasets of work by
 
 **Try it:** `pip install .`, then `python -m crs_products run --local /tmp/out --partitions TE10 --max-units 3`, or `python -m crs_products run --dataset summaries --local /tmp/sum --partitions 119-sconres`.
 
+**Incomplete API listings:** the products adapter makes bounded independent passes when pagination does not reconcile with the advertised count, page counts change, or the first page changes during the read. Passes are never unioned. If no pass reconciles, the sync records a degraded source check, retains all product rows and the last complete listing, and warns on Actions; it does not start a continuation run. The next scheduled probe follows the existing source-failure backoff. Live verification reports the comparison as unavailable rather than declaring stored rows "extra," and confirms apparently extra IDs through the detail endpoint before reporting removals. Hash, row and manifest failures still fail verification. A reconciled count and stable head are consistency checks, not a guarantee that the API supplied an atomic snapshot.
+
 ## License
 
 MIT. See [`LICENSE`](LICENSE).

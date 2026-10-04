@@ -4,6 +4,7 @@ import math
 from collections import Counter
 
 from .pipeline import MAX_ATTEMPTS
+from .source import listing_problem, listing_summary
 from .store import partition_of, partition_path
 
 # A complete partition may differ from a live listing by this much: products published or removed since the last run.
@@ -64,6 +65,8 @@ def verify(store, source=None, partition_of=partition_of, tally="text_source", l
     }
     if source is not None:
         report["live"] = (live or live_diff)(manifest, stored, source, problems, partition_of)
+        if report["live"].get("warning"):
+            report["warnings"] = [report["live"]["warning"]]
     report["problems"] = problems
     return report
 
@@ -73,6 +76,16 @@ def live_diff(manifest, stored, source, problems, partition_of=partition_of):
     head, items = source.list_all()
     live = set(items)
     hub = set().union(*stored.values()) if stored else set()
+    summary = listing_summary(head, items)
+    warning = listing_problem(summary)
+    if warning is None:
+        present = [uid for uid in sorted(hub - live) if source.exists(uid)]
+        if present:
+            summary.update(complete=False, unlisted_but_present=len(present))
+            warning = f"source listing incomplete: the detail API still serves {len(present)} stored IDs omitted by the listing; exact comparison unavailable"
+    if warning:
+        return {"status": "incomplete", "count": head["count"], "listed": len(live), "on_hub": len(hub),
+                "missing": None, "extra": None, "listing": summary, "warning": warning}
     failed = {uid for uid, f in (manifest.get("failures") or {}).items() if f["attempts"] >= MAX_ATTEMPTS}
     missing, extra = sorted(live - hub), sorted(hub - live)
     by_key = Counter(partition_of(uid) for uid in missing if uid not in failed) + Counter(partition_of(uid) for uid in extra)

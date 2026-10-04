@@ -6,6 +6,7 @@ from collections import defaultdict
 
 from .pipeline import MAX_ATTEMPTS, PROBE_KEY, RETRY_AFTER_HOURS, TEXT_RETRY_HOURS, probe_state
 from .store import SCHEMA
+from .source import listing_problem
 from .verify import TOLERANCE_MIN
 
 GITHUB = "https://github.com/incrediblecrab/crs-service-products"
@@ -78,6 +79,9 @@ def render(manifest):
         lines.append("The first sync has not listed the API yet.")
     if listing.get("at"):
         lines += ["", f"Last complete sync: {listing['at']} UTC."]
+    source_listing = manifest.get("source_listing")
+    if source_listing and (problem := listing_problem(source_listing)):
+        lines += ["", f"**Degraded:** {problem}. No product rows were changed by this attempt; the last complete sync is retained."]
     lines += ["", "| Series | Rows | With text | Listed | Partitions complete |", "|---|---:|---:|---:|---:|"]
     series = defaultdict(lambda: [0, 0, 0, 0, 0])
     for key, entry in entries.items():

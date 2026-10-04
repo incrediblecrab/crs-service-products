@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 from .http import Blocked, MissingKey, QuotaExhausted
+from .source import IncompleteListing, listing_problem, listing_summary
 from .store import Superseded, normalize, partition_of
 
 log = logging.getLogger("crs_products")
@@ -228,9 +229,13 @@ def sync(ctx, source):
     manifest.setdefault("partitions", {})
     manifest.setdefault("failures", {})
     manifest["version"] = MANIFEST_VERSION
-    finished, reason, listing = True, None, None
+    finished, reason, listing, warnings = True, None, None, []
     try:
         head, items = source.list_all()
+        manifest["source_listing"] = dict(listing_summary(head, items), at=started)
+        problem = listing_problem(manifest["source_listing"])
+        if problem:
+            raise IncompleteListing(problem)
         partitions = group(items, ctx.partition_of)
         listing = {"count": head["count"], "newest": head["newest"], "listed": len(items), "at": started,
                    "partitions": {key: len(partitions[key].units) for key in sorted(partitions)}}
@@ -244,6 +249,10 @@ def sync(ctx, source):
             if ctx.out_of_time() or not sync_partition(ctx, source, manifest, partition):
                 finished, reason = False, "budget"
                 break
+    except IncompleteListing as error:
+        finished, reason = False, "incomplete listing"
+        warnings.append(str(error))
+        log.warning("%s; stored data and the last complete listing are retained", error)
     except Superseded as error:
         finished, reason = False, "superseded"
         log.warning("stopped: %s", error)
@@ -254,15 +263,17 @@ def sync(ctx, source):
         finished, reason = False, f"{type(error).__name__}: {error}"[:300]
         log.exception("run failed")
     run = {"started": started, "ended": utcnow(), "writer": ctx.writer, "finished": finished, "stopped": reason}
+    if warnings:
+        run["warnings"] = warnings
     run.update({key: ctx.stats[key] for key in ("fetched", "unchanged", "failed", "removed", "suspect_listings")})
     if reason == "superseded":
         return dict(run, commits=ctx.stats["commits"])
     runs = base.get("runs") or []
     # The listing is what the probe compares against, so it is published only by a run that brought every partition up to date with it; until then the probe keeps asking for a run.
-    changed = False
+    changed = (base.get("source_listing") or {}).get("complete") is False and not warnings
     if finished and ctx.only is None and listing:
         old = base.get("listing") or {}
-        changed = any(listing[key] != old.get(key) for key in ("count", "newest", "listed", "partitions")) or age_hours(old.get("at")) > 23
+        changed = changed or any(listing[key] != old.get(key) for key in ("count", "newest", "listed", "partitions")) or age_hours(old.get("at")) > 23
         manifest["listing"] = listing
     if ctx.store.staged or ctx.stats["commits"] or changed or reason not in CLEAN_STOPS or not runs or age_hours(runs[-1].get("ended")) > 23:
         manifest["runs"] = runs[-(RUNS_KEPT - 1):] + [dict(run, commits=ctx.stats["commits"] + 1)]

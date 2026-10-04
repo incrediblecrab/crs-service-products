@@ -123,6 +123,22 @@ def test_verify_checks_each_dataset_with_its_own_partitions_and_tally(monkeypatc
     assert seen == dict(expected, source=None)
 
 
+@pytest.mark.parametrize("problems, code", [([], 0), (["planted integrity failure"], 1)])
+def test_degraded_verification_warns_but_integrity_failures_still_exit_one(actions, monkeypatch, tmp_path, capsys, problems, code):
+    import crs_products.verify
+
+    monkeypatch.setattr(crs_products.verify, "verify", lambda *args, **kwargs: {"problems": problems, "warnings": ["source listing incomplete"]})
+    assert cli.main(["verify", "--local", str(tmp_path)]) == code
+    assert "::warning::source listing incomplete" in capsys.readouterr().out
+
+
+def test_an_incomplete_sync_warns_without_starting_a_continuation(actions, monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(cli, "sync", lambda ctx, source: {"finished": False, "stopped": "incomplete listing", "warnings": ["source listing incomplete"], "fetched": 0, "commits": 1})
+    assert cli.main(["run", "--local", str(tmp_path)]) == 0
+    assert "::warning::source listing incomplete" in capsys.readouterr().out
+    assert outputs(actions) == {"commits": "1", "more": "false"}
+
+
 @pytest.mark.parametrize("dataset, repo", sorted(cli.REPOS.items()))
 def test_trusted_publishing_asks_for_the_dataset_s_own_repo(actions, monkeypatch, dataset, repo):
     seen = []

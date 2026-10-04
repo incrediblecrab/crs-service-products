@@ -114,6 +114,56 @@ def test_no_manifest_is_a_problem(tmp_path):
     assert verify(local_store(tmp_path))["problems"] == ["no manifest.json"]
 
 
+def test_short_live_listing_is_degraded_not_a_claim_of_extra_rows(synced):
+    store, state = synced
+    del state.units["R40003"]
+    state.count = 4
+    report = verify(store, ScriptedSource(state))
+    assert report["problems"] == []
+    assert "source listing incomplete" in report["warnings"][0]
+    assert report["live"]["status"] == "incomplete"
+    assert report["live"]["extra"] is None and report["live"]["missing"] is None
+    PLANTS["sha256"][0](store)
+    assert verify(store, ScriptedSource(state))["problems"], "a source outage must not suppress integrity failures"
+
+
+def test_live_extra_rows_are_confirmed_through_detail_before_reporting(synced):
+    store, state = synced
+    del state.units["R40003"]
+    state.exists.add("R40003")
+    report = verify(store, ScriptedSource(state))
+    assert state.exists_asked == ["R40003"]
+    assert report["problems"] == [] and report["live"]["status"] == "incomplete"
+    assert "still serves" in report["warnings"][0]
+
+
+def test_an_unreconciled_source_does_not_replace_the_last_complete_sync(synced):
+    store, state = synced
+    before = store.read_manifest()
+    state.count = 100
+    state.units = {"R40001": T1}
+    state.fetched.clear()
+    result = run_once(store, state)
+    after = store.read_manifest()
+    assert result["finished"] is False and result["stopped"] == "incomplete listing"
+    assert result["warnings"] and not state.fetched and not state.exists_asked
+    assert after["listing"] == before["listing"] and after["partitions"] == before["partitions"]
+    assert after["source_listing"]["complete"] is False
+    assert "source listing incomplete" in store.read_text("README.md")
+
+
+def test_a_recovered_listing_clears_degraded_status_even_without_data_changes(synced):
+    store, state = synced
+    state.count = 100
+    run_once(store, state)
+    assert store.read_manifest()["source_listing"]["complete"] is False
+    state.count = None
+    run = run_once(store, state)
+    assert run["finished"] and run["commits"] > 0
+    assert store.read_manifest()["source_listing"]["complete"] is True
+    assert "**Degraded:**" not in store.read_text("README.md")
+
+
 def run_cli(*args):
     env = {key: value for key, value in os.environ.items() if key not in ("GITHUB_ACTIONS", "GITHUB_OUTPUT", "HF_OIDC_RESOURCE")}
     return subprocess.run([sys.executable, "-m", "crs_products", *args], capture_output=True, text=True, cwd=REPO, env=env)

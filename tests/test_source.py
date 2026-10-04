@@ -184,9 +184,10 @@ def test_list_all_pages_by_count_and_dedups_shifted_pages(monkeypatch):
 
     source = CrsSource(FakeFetcher(json_map={f"{API}/crsreport": listing}))
     head, found = source.list_all()
-    assert head == {"count": 5, "newest": mark(items[0])} and head["newest"] == "R40000@2026-09-09T00:00:00Z"
+    assert head["count"] == 5 and head["newest"] == "R40000@2026-09-09T00:00:00Z"
+    assert head["listing"]["complete"] is True and head["listing"]["duplicates"] == 1
     assert sorted(found) == ["R40000", "R40001", "R40002", "R40003", "R40004"]
-    assert source.head() == head
+    assert source.head() == {key: head[key] for key in ("count", "newest")}
 
 
 def test_the_probe_sends_exactly_the_listing_first_request():
@@ -202,5 +203,60 @@ def test_the_probe_sends_exactly_the_listing_first_request():
 
     source = CrsSource(FakeFetcher(json_map={f"{API}/crsreport": listing}))
     head, _ = source.list_all()
-    assert source.head() == head == {"count": 2, "newest": "IN12689@2026-09-25T04:09:54Z"}
+    assert source.head() == {key: head[key] for key in ("count", "newest")} == {"count": 2, "newest": "IN12689@2026-09-25T04:09:54Z"}
     assert asked[-1] == asked[0]
+
+
+def test_short_listings_retry_without_unioning_different_passes(monkeypatch):
+    monkeypatch.setattr(source_module, "PAGE", 2)
+    passes = 0
+
+    def listing(params):
+        nonlocal passes
+        if params["offset"] == 0:
+            passes += 1
+        ids = ["R40001", "R40001"] if passes == 1 else ["R40002", "R40003"]
+        return {"CRSReports": [{"id": uid, "updateDate": "same"} for uid in ids], "pagination": {"count": 2}}
+
+    source = CrsSource(FakeFetcher(json_map={f"{API}/crsreport": listing}))
+    head, found = source.list_all()
+    assert set(found) == {"R40002", "R40003"}
+    assert head["listing"]["complete"] is True and head["listing"]["attempts"] == 2
+
+
+def test_persistently_short_listing_is_bounded_and_reported():
+    fetcher = FakeFetcher(json_map={f"{API}/crsreport": {"CRSReports": [{"id": "R40001"}, {"id": "R40001"}], "pagination": {"count": 2}}})
+    head, found = CrsSource(fetcher).list_all()
+    assert set(found) == {"R40001"}
+    assert head["listing"]["complete"] is False and head["listing"]["duplicates"] == 1
+    assert head["listing"]["attempts"] == source_module.LISTING_ATTEMPTS
+    assert len(fetcher.requests) <= 2 * source_module.LISTING_ATTEMPTS
+
+
+def test_a_count_change_during_pagination_never_claims_completeness(monkeypatch):
+    monkeypatch.setattr(source_module, "PAGE", 2)
+
+    def listing(params):
+        ids = ["R40001", "R40002"] if params["offset"] == 0 else ["R40003"]
+        return {"CRSReports": [{"id": uid} for uid in ids], "pagination": {"count": 3 if params["offset"] == 0 else 4}}
+
+    head, found = CrsSource(FakeFetcher(json_map={f"{API}/crsreport": listing})).list_all()
+    assert len(found) == head["count"] == 3
+    assert head["listing"]["complete"] is False and head["listing"]["counts_stable"] is False
+
+
+def test_invalid_listing_is_not_an_empty_success():
+    with pytest.raises(ValueError, match="listing"):
+        CrsSource(FakeFetcher(json_map={f"{API}/crsreport": {}})).list_all()
+
+
+def test_exists_rejects_a_detail_for_a_different_product():
+    source, _ = source_with({}, details={f"{API}/crsreport/R40001": RL34480})
+    with pytest.raises(RuntimeError, match="answered RL34480"):
+        source.exists("R40001")
+
+
+def test_exists_does_not_treat_a_malformed_detail_as_a_removed_product():
+    source, _ = source_with({}, details={f"{API}/crsreport/R40001": {}})
+    with pytest.raises(ValueError, match="detail response"):
+        source.exists("R40001")

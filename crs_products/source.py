@@ -18,8 +18,23 @@ from .text import html_text, pdf_text, summary_text, tidy
 
 API = "https://api.congress.gov/v3"
 PAGE = 250
+LISTING_ATTEMPTS = 3
 NO_TEXT = {"text": None, "text_source": None, "text_url": None, "text_sha256": None}
 log = logging.getLogger("crs_products")
+
+
+class IncompleteListing(RuntimeError):
+    """The source listing cannot support a complete sync or an exact comparison."""
+
+
+def listing_summary(head, items):
+    return {"count": head["count"], "distinct": len(items), "complete": len(items) == head["count"], **head.get("listing", {})}
+
+
+def listing_problem(summary):
+    if not summary["complete"]:
+        return f"source listing incomplete: {summary['distinct']} distinct IDs against {summary['count']} advertised; counts or the newest item may have shifted; exact comparison unavailable"
+    return None
 
 
 def mark(item):
@@ -64,8 +79,15 @@ class CrsSource:
         self.html_blocked = None
 
     def page(self, offset):
-        data = self.fetcher.json(f"{API}/crsreport", params={"format": "json", "limit": PAGE, "offset": offset}) or {}
-        return int((data.get("pagination") or {}).get("count") or 0), data.get("CRSReports") or []
+        data = self.fetcher.json(f"{API}/crsreport", params={"format": "json", "limit": PAGE, "offset": offset})
+        if not isinstance(data, dict) or not isinstance(data.get("pagination"), dict) or not isinstance(data.get("CRSReports"), list):
+            raise ValueError("invalid CRS listing response: missing pagination or CRSReports")
+        count, items = data["pagination"].get("count"), data["CRSReports"]
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            raise ValueError("invalid CRS listing count")
+        if any(not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"] for item in items):
+            raise ValueError("invalid CRS listing product ID")
+        return count, items
 
     def head(self):
         """One request, the same one list_all() sends first: how many products the API lists, and the newest. Requests that differ only in limit have answered from different snapshots (tests/test_source.py has the measurement), so a probe asking with another limit can see a newer or older first item than the listing publishes."""
@@ -73,24 +95,39 @@ class CrsSource:
         return {"count": count, "newest": mark(items[0] if items else None)}
 
     def list_all(self):
-        """Every listed product, by id. Pages can shift while they are read (an update moves a product to the top), so ids are deduplicated and a product missed this way is caught by the next listing."""
-        count, items = self.page(0)
-        head = {"count": count, "newest": mark(items[0] if items else None)}
-        found, offset = {}, 0
-        while items:
-            for item in items:
-                if item.get("id"):
+        """Independent bounded passes, never a union of snapshots. Reconcile distinct IDs with every page's count and recheck the head before accepting a pass."""
+        for attempt in range(1, LISTING_ATTEMPTS + 1):
+            count, items = self.page(0)
+            head = {"count": count, "newest": mark(items[0] if items else None)}
+            found, offset, pages, stable = {}, 0, 1, True
+            while items:
+                for item in items:
                     found.setdefault(item["id"], item)
-            offset += len(items)
-            if offset >= count:
+                offset += len(items)
+                if offset >= count:
+                    break
+                page_count, items = self.page(offset)
+                pages += 1
+                stable = stable and page_count == count
+            end = self.head()
+            summary = {"count": count, "distinct": len(found), "received": offset, "duplicates": offset - len(found),
+                       "pages": pages, "attempts": attempt, "counts_stable": stable and end["count"] == count,
+                       "head_stable": end == head, "complete": stable and end == head and len(found) == count}
+            if summary["complete"]:
                 break
-            _, items = self.page(offset)
-        return head, found
+            log.warning("%s (pass %d/%d)", listing_problem(summary), attempt, LISTING_ATTEMPTS)
+        return dict(head, listing=summary), found
 
     def detail(self, uid):
         data = self.fetcher.json(f"{API}/crsreport/{quote(uid, safe='')}", params={"format": "json"})
-        report = (data or {}).get("CRSReport")
-        return report if isinstance(report, dict) else None
+        if data is None:
+            return None
+        if not isinstance(data, dict) or not isinstance(data.get("CRSReport"), dict):
+            raise ValueError(f"invalid CRS detail response for {uid}")
+        report = data["CRSReport"]
+        if report.get("id") != uid:
+            raise RuntimeError(f"asked for {uid}, the API answered {report.get('id')}")
+        return report
 
     def exists(self, uid):
         return self.detail(uid) is not None
@@ -99,8 +136,6 @@ class CrsSource:
         report = self.detail(unit.id)
         if report is None:
             raise RuntimeError(f"the API lists {unit.id} but has no detail for it")
-        if report.get("id") != unit.id:
-            raise RuntimeError(f"asked for {unit.id}, the API answered {report.get('id')}")
         return dict(product_row(report), **self.text(report))
 
     def text(self, report):
